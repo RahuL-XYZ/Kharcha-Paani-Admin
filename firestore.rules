@@ -1,0 +1,62 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // === Helper Functions ===
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() && request.auth.token.admin == true;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isHouseholdMember(householdId) {
+      return isAuthenticated() && (
+        request.auth.uid in get(/databases/$(database)/documents/households/$(householdId)).data.memberIds
+      );
+    }
+
+    // === 1. Users Collection ===
+    match /users/{userId} {
+      // Admins and authenticated users can read profiles; users can update their own
+      allow read: if isAuthenticated();
+      allow write: if isOwner(userId) || isAdmin();
+    }
+
+    // === 2. Households (Groups) ===
+    match /households/{householdId} {
+      // Admins can read all households; members can read their own
+      allow read: if isAdmin() || (isAuthenticated() && request.auth.uid in resource.data.memberIds);
+      allow create: if isAuthenticated();
+      allow update, delete: if isAdmin() || (isAuthenticated() && request.auth.uid in resource.data.memberIds);
+
+      // Members subcollection
+      match /members/{memberId} {
+        allow read: if isAdmin() || isHouseholdMember(householdId);
+        allow write: if isAdmin() || isHouseholdMember(householdId);
+      }
+
+      // Expenses subcollection
+      match /expenses/{expenseId} {
+        allow read: if isAdmin() || isHouseholdMember(householdId);
+        allow write: if isAdmin() || isHouseholdMember(householdId);
+      }
+
+      // Settlements subcollection
+      match /settlements/{settlementId} {
+        allow read: if isAdmin() || isHouseholdMember(householdId);
+        allow write: if isAdmin() || isHouseholdMember(householdId);
+      }
+    }
+
+    // === 3. Collection Group Query for Admin Expense Audits ===
+    match /{path=**}/expenses/{expenseId} {
+      allow read: if isAdmin();
+    }
+  }
+}
