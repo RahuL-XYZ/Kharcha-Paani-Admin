@@ -4,7 +4,7 @@ service cloud.firestore {
 
     // === Helper Functions ===
     function isAuthenticated() {
-      return request.auth != null;
+      return request.auth != null && request.auth.uid != null;
     }
 
     function isAdmin() {
@@ -17,7 +17,17 @@ service cloud.firestore {
 
     function isHouseholdMember(householdId) {
       return isAuthenticated() && (
-        request.auth.uid in get(/databases/$(database)/documents/households/$(householdId)).data.memberIds
+        isAdmin() ||
+        request.auth.uid in get(/databases/$(database)/documents/households/$(householdId)).data.memberIds ||
+        exists(/databases/$(database)/documents/households/$(householdId)/members/$(request.auth.uid))
+      );
+    }
+
+    function isHouseholdOwner(householdId) {
+      return isAuthenticated() && (
+        isAdmin() ||
+        get(/databases/$(database)/documents/households/$(householdId)).data.createdBy == request.auth.uid ||
+        get(/databases/$(database)/documents/households/$(householdId)/members/$(request.auth.uid)).data.role == 'owner'
       );
     }
 
@@ -30,15 +40,45 @@ service cloud.firestore {
 
     // === 2. Households (Groups) ===
     match /households/{householdId} {
-      // Admins can read all households; members can read their own
-      allow read: if isAdmin() || (isAuthenticated() && request.auth.uid in resource.data.memberIds);
-      allow create: if isAuthenticated();
-      allow update, delete: if isAdmin() || (isAuthenticated() && request.auth.uid in resource.data.memberIds);
+      // Admins can read all. App users can read their own or query active households by invite code
+      allow read: if isAdmin() || (isAuthenticated() && (
+        resource == null ||
+        request.auth.uid in resource.data.memberIds ||
+        resource.data.isActive == true
+      ));
+
+      // Group creation
+      allow create: if isAuthenticated() && (
+        isAdmin() || (
+          request.resource.data.createdBy == request.auth.uid &&
+          request.resource.data.name.size() > 0 &&
+          request.resource.data.inviteCode.size() == 6
+        )
+      );
+
+      // Group updates (allows members/owners, or users joining via inviteCode)
+      allow update: if isAdmin() || (isAuthenticated() && (
+        (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['memberIds', 'memberCount']) &&
+         request.resource.data.memberIds.hasAll(resource.data.memberIds) &&
+         request.auth.uid in request.resource.data.memberIds) ||
+        isHouseholdOwner(householdId)
+      ));
+
+      allow delete: if isAdmin();
 
       // Members subcollection
       match /members/{memberId} {
         allow read: if isAdmin() || isHouseholdMember(householdId);
-        allow write: if isAdmin() || isHouseholdMember(householdId);
+
+        // Allows creator to add self during creation or users to join as self
+        allow create: if isAdmin() || (isAuthenticated() && (
+          isOwner(memberId) ||
+          get(/databases/$(database)/documents/households/$(householdId)).data.createdBy == request.auth.uid
+        ));
+
+        allow update, delete: if isAdmin() || (isHouseholdMember(householdId) && (
+          isOwner(memberId) || isHouseholdOwner(householdId)
+        ));
       }
 
       // Expenses subcollection
